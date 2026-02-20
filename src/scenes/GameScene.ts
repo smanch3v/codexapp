@@ -8,7 +8,7 @@ import {
   WEAPON_CONFIG
 } from '../constants';
 
-type EnemyRectangle = Phaser.GameObjects.Rectangle & {
+type EnemyBody = Phaser.Physics.Arcade.Image & {
   body: Phaser.Physics.Arcade.Body;
   hp: number;
 };
@@ -31,6 +31,8 @@ export class GameScene extends Phaser.Scene {
   private spawnCooldownMs = ENEMY_CONFIG.maxSpawnIntervalMs;
   private elapsedSeconds = 0;
   private isGameOver = false;
+  private hasLoggedMissingBulletBody = false;
+  private hasLoggedMissingEnemyBody = false;
 
   constructor() {
     super('GameScene');
@@ -54,8 +56,10 @@ export class GameScene extends Phaser.Scene {
 
     this.player.body.setAllowGravity(false).setImmovable(true);
 
-    this.bullets = this.physics.add.group();
-    this.enemies = this.physics.add.group();
+    this.ensureTextures();
+
+    this.bullets = this.physics.add.group({ allowGravity: false });
+    this.enemies = this.physics.add.group({ allowGravity: false });
 
     this.cursorKeys = this.input.keyboard?.createCursorKeys() as Phaser.Types.Input.Keyboard.CursorKeys;
     this.wasdKeys = this.input.keyboard?.addKeys({
@@ -63,7 +67,7 @@ export class GameScene extends Phaser.Scene {
       right: Phaser.Input.Keyboard.KeyCodes.D
     }) as { left: Phaser.Input.Keyboard.Key; right: Phaser.Input.Keyboard.Key };
 
-    this.physics.add.collider(this.bullets, this.enemies, this.onBulletHitsEnemy, undefined, this);
+    this.physics.add.overlap(this.bullets, this.enemies, this.onBulletHitsEnemy, undefined, this);
 
     this.hudText = this.add.text(16, 14, '', {
       color: '#f1f5f9',
@@ -129,22 +133,15 @@ export class GameScene extends Phaser.Scene {
   }
 
   private spawnBullet(): void {
-    const bulletShape = this.add
-      .rectangle(
-        this.player.x,
-        this.player.y - PLAYER_CONFIG.height,
-        WEAPON_CONFIG.bulletWidth,
-        WEAPON_CONFIG.bulletHeight,
-        WEAPON_CONFIG.bulletColor
-      )
-      .setOrigin(0.5);
+    const bullet = this.bullets.create(
+      this.player.x,
+      this.player.y - PLAYER_CONFIG.height,
+      'bullet'
+    ) as Phaser.Physics.Arcade.Image & { body: Phaser.Physics.Arcade.Body };
 
-    const bullet = this.physics.add.existing(bulletShape) as Phaser.GameObjects.Rectangle & {
-      body: Phaser.Physics.Arcade.Body;
-    };
-
-    bullet.body.setAllowGravity(false).setVelocityY(-WEAPON_CONFIG.bulletSpeed);
-    this.bullets.add(bullet);
+    bullet.setActive(true).setVisible(true);
+    bullet.body.enable = true;
+    bullet.body.setAllowGravity(false).setVelocityY(-600);
   }
 
   private updateEnemySpawning(deltaMs: number): void {
@@ -163,27 +160,24 @@ export class GameScene extends Phaser.Scene {
   }
 
   private spawnEnemy(): void {
-    const margin = ENEMY_CONFIG.width;
+    const margin = ENEMY_CONFIG.width / 2;
     const x = Phaser.Math.Between(margin, GAME_CONFIG.width - margin);
 
-    const enemyShape = this.add
-      .rectangle(x, -ENEMY_CONFIG.height, ENEMY_CONFIG.width, ENEMY_CONFIG.height, ENEMY_CONFIG.color)
-      .setOrigin(0.5);
-
-    const enemy = this.physics.add.existing(enemyShape) as EnemyRectangle;
+    const enemy = this.enemies.create(x, -30, 'enemy') as EnemyBody;
 
     const hpRamp = Math.floor(this.score / ENEMY_CONFIG.hpRampEveryPoints) * ENEMY_CONFIG.hpRampAmount;
     enemy.hp = ENEMY_CONFIG.hpBase + hpRamp;
-    enemy.body.setAllowGravity(false).setVelocityY(ENEMY_CONFIG.speed);
-    this.enemies.add(enemy);
+    enemy.setActive(true).setVisible(true);
+    enemy.body.enable = true;
+    enemy.body.setAllowGravity(false).setVelocityY(Phaser.Math.Between(120, 220));
   }
 
   private onBulletHitsEnemy(
     bulletObject: Phaser.GameObjects.GameObject,
     enemyObject: Phaser.GameObjects.GameObject
   ): void {
-    const bullet = bulletObject as Phaser.GameObjects.Rectangle & { body: Phaser.Physics.Arcade.Body };
-    const enemy = enemyObject as EnemyRectangle;
+    const bullet = bulletObject as Phaser.Physics.Arcade.Image & { body: Phaser.Physics.Arcade.Body };
+    const enemy = enemyObject as EnemyBody;
 
     bullet.destroy();
     enemy.hp -= WEAPON_CONFIG.bulletDamage;
@@ -197,8 +191,17 @@ export class GameScene extends Phaser.Scene {
 
   private updateEnemyProgress(): void {
     for (const entry of this.enemies.getChildren()) {
-      const enemy = entry as EnemyRectangle;
+      const enemy = entry as EnemyBody;
       if (!enemy.active) {
+        continue;
+      }
+
+      if (!enemy.body) {
+        if (!this.hasLoggedMissingEnemyBody) {
+          console.warn('[GameScene] Enemy missing arcade body; destroying orphan object.');
+          this.hasLoggedMissingEnemyBody = true;
+        }
+        enemy.destroy();
         continue;
       }
 
@@ -208,14 +211,27 @@ export class GameScene extends Phaser.Scene {
         continue;
       }
 
-      if (enemy.y > GAME_CONFIG.height + ENEMY_CONFIG.height) {
+      if (enemy.y > GAME_CONFIG.height + 50) {
         enemy.destroy();
       }
     }
 
     for (const entry of this.bullets.getChildren()) {
-      const bullet = entry as Phaser.GameObjects.Rectangle;
-      if (bullet.active && bullet.y < -WEAPON_CONFIG.bulletHeight) {
+      const bullet = entry as Phaser.Physics.Arcade.Image & { body?: Phaser.Physics.Arcade.Body };
+      if (!bullet.active) {
+        continue;
+      }
+
+      if (!bullet.body) {
+        if (!this.hasLoggedMissingBulletBody) {
+          console.warn('[GameScene] Bullet missing arcade body; destroying orphan object.');
+          this.hasLoggedMissingBulletBody = true;
+        }
+        bullet.destroy();
+        continue;
+      }
+
+      if (bullet.y < -50) {
         bullet.destroy();
       }
     }
@@ -262,9 +278,47 @@ export class GameScene extends Phaser.Scene {
     const enemies = this.enemies?.getLength() ?? 0;
     const fps = Math.round(this.game.loop.actualFps);
 
+    const bulletAvgVy = this.getAverageVelocityY(this.bullets);
+    const enemyAvgVy = this.getAverageVelocityY(this.enemies);
+
     this.hudText?.setText(
-      `Score: ${this.score}   HP: ${this.playerHp}\nBullets: ${bullets}  Enemies: ${enemies}  FPS: ${fps}`
+      `Score: ${this.score}   HP: ${this.playerHp}\nBullets: ${bullets}  Enemies: ${enemies}  FPS: ${fps}\nBulletVY avg: ${bulletAvgVy.toFixed(1)}  EnemyVY avg: ${enemyAvgVy.toFixed(1)}`
     );
+  }
+
+  private getAverageVelocityY(group: Phaser.Physics.Arcade.Group): number {
+    let total = 0;
+    let count = 0;
+
+    for (const entry of group.getChildren()) {
+      const body = (entry as Phaser.GameObjects.GameObject & { body?: Phaser.Physics.Arcade.Body }).body;
+      if (!body || !(entry as Phaser.GameObjects.GameObject).active) {
+        continue;
+      }
+
+      total += body.velocity.y;
+      count += 1;
+    }
+
+    return count > 0 ? total / count : 0;
+  }
+
+  private ensureTextures(): void {
+    if (!this.textures.exists('bullet')) {
+      const bulletGraphic = this.add.graphics();
+      bulletGraphic.fillStyle(WEAPON_CONFIG.bulletColor, 1);
+      bulletGraphic.fillRect(0, 0, WEAPON_CONFIG.bulletWidth, WEAPON_CONFIG.bulletHeight);
+      bulletGraphic.generateTexture('bullet', WEAPON_CONFIG.bulletWidth, WEAPON_CONFIG.bulletHeight);
+      bulletGraphic.destroy();
+    }
+
+    if (!this.textures.exists('enemy')) {
+      const enemyGraphic = this.add.graphics();
+      enemyGraphic.fillStyle(ENEMY_CONFIG.color, 1);
+      enemyGraphic.fillRect(0, 0, ENEMY_CONFIG.width, ENEMY_CONFIG.height);
+      enemyGraphic.generateTexture('enemy', ENEMY_CONFIG.width, ENEMY_CONFIG.height);
+      enemyGraphic.destroy();
+    }
   }
 
   private createGameOverOverlay(): Phaser.GameObjects.Container {
